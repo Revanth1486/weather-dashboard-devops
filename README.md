@@ -189,3 +189,4 @@ open backend/coverage/lcov-report/index.html
 Built by **[Your Name]** as a DevOps portfolio project demonstrating end-to-end CI/CD with GitHub Actions, Docker, SonarQube, Trivy, JFrog, Terraform, and AWS EKS.
 
 Connect: [LinkedIn](https://linkedin.com) | [GitHub](https://github.com)
+# Weather Dashboard DevOps
