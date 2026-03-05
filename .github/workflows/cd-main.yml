@@ -1,0 +1,131 @@
+name: CD - Production (main branch)
+
+on:
+  push:
+    branches: [main]
+
+env:
+  JFROG_REGISTRY: ${{ secrets.JFROG_REGISTRY }}
+  IMAGE_NAME: weather-dashboard
+  AWS_REGION: us-east-1
+  EKS_CLUSTER: weather-dashboard-prod
+  K8S_NAMESPACE: production
+
+jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1: Push Production Image to JFrog
+  # ─────────────────────────────────────────────
+  push-production:
+    name: 📦 Tag & Push Production Image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to JFrog Artifactory
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.JFROG_REGISTRY }}
+          username: ${{ secrets.JFROG_USERNAME }}
+          password: ${{ secrets.JFROG_PASSWORD }}
+
+      - name: Build & Push Backend (Production)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:${{ github.sha }}
+            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:latest
+            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:prod-${{ github.run_number }}
+
+      - name: Build & Push Frontend (Production)
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ github.sha }}
+            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
+            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:prod-${{ github.run_number }}
+
+  # ─────────────────────────────────────────────
+  # JOB 2: Deploy to Production EKS
+  # ─────────────────────────────────────────────
+  deploy-production:
+    name: 🚀 Deploy to Production EKS
+    runs-on: ubuntu-latest
+    needs: push-production
+    environment: production  # Requires manual approval in GitHub Environments
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig for Production EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER }}
+
+      - name: Create Namespace
+        run: kubectl apply -f k8s/namespace.yaml
+
+      - name: Create Secrets
+        run: |
+          kubectl create secret docker-registry jfrog-registry-secret \
+            --docker-server=${{ env.JFROG_REGISTRY }} \
+            --docker-username=${{ secrets.JFROG_USERNAME }} \
+            --docker-password=${{ secrets.JFROG_PASSWORD }} \
+            --namespace=${{ env.K8S_NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create secret generic weather-api-secret \
+            --from-literal=OPENWEATHER_API_KEY=${{ secrets.OPENWEATHER_API_KEY }} \
+            --namespace=${{ env.K8S_NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy to Production
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+          JFROG_REGISTRY: ${{ env.JFROG_REGISTRY }}
+        run: |
+          sed -i "s|IMAGE_TAG|$IMAGE_TAG|g" k8s/deployment.yaml
+          sed -i "s|JFROG_REGISTRY|$JFROG_REGISTRY|g" k8s/deployment.yaml
+          kubectl apply -f k8s/ --namespace=${{ env.K8S_NAMESPACE }}
+
+      - name: Rolling Deployment (Zero Downtime)
+        run: |
+          kubectl rollout status deployment/weather-backend \
+            --namespace=${{ env.K8S_NAMESPACE }} --timeout=180s
+          kubectl rollout status deployment/weather-frontend \
+            --namespace=${{ env.K8S_NAMESPACE }} --timeout=180s
+
+      - name: Get Production URL
+        run: |
+          PROD_URL=$(kubectl get ingress weather-ingress \
+            --namespace=${{ env.K8S_NAMESPACE }} \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "🎉 PRODUCTION DEPLOYED!"
+          echo "🌍 Production URL: https://$PROD_URL"
+
+      - name: Deployment Summary
+        run: |
+          echo "============================================"
+          echo "🎉 PRODUCTION DEPLOYMENT SUCCESSFUL"
+          echo "📦 Image Tag: ${{ github.sha }}"
+          echo "🏗️  Build:  #${{ github.run_number }}"
+          echo "👤 Deployed by: ${{ github.actor }}"
+          echo "⏰ Time: $(date -u)"
+          echo "============================================"

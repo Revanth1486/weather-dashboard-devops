@@ -1,0 +1,178 @@
+name: CD - Staging (develop branch)
+
+on:
+  push:
+    branches: [develop]
+
+env:
+  JFROG_REGISTRY: ${{ secrets.JFROG_REGISTRY }}
+  IMAGE_NAME: weather-dashboard
+  AWS_REGION: us-east-1
+  EKS_CLUSTER: weather-dashboard-staging
+  K8S_NAMESPACE: staging
+
+jobs:
+  # ─────────────────────────────────────────────
+  # JOB 1: Push to JFrog Artifactory
+  # ─────────────────────────────────────────────
+  push-to-jfrog:
+    name: 📦 Push to JFrog Artifactory
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to JFrog Artifactory
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.JFROG_REGISTRY }}
+          username: ${{ secrets.JFROG_USERNAME }}
+          password: ${{ secrets.JFROG_PASSWORD }}
+
+      - name: Build & Push Backend to JFrog
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:develop-${{ github.sha }}
+            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:develop-latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build & Push Frontend to JFrog
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:develop-${{ github.sha }}
+            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:develop-latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: JFrog Image Summary
+        run: |
+          echo "✅ Images pushed to JFrog:"
+          echo "  Backend:  ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:develop-${{ github.sha }}"
+          echo "  Frontend: ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:develop-${{ github.sha }}"
+
+  # ─────────────────────────────────────────────
+  # JOB 2: Deploy to Staging EKS
+  # ─────────────────────────────────────────────
+  deploy-staging:
+    name: 🚀 Deploy to Staging EKS
+    runs-on: ubuntu-latest
+    needs: push-to-jfrog
+    environment: staging
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER }}
+
+      - name: Create Namespace
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+
+      - name: Create JFrog Pull Secret
+        run: |
+          kubectl create secret docker-registry jfrog-registry-secret \
+            --docker-server=${{ env.JFROG_REGISTRY }} \
+            --docker-username=${{ secrets.JFROG_USERNAME }} \
+            --docker-password=${{ secrets.JFROG_PASSWORD }} \
+            --namespace=${{ env.K8S_NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create Weather API Secret
+        run: |
+          kubectl create secret generic weather-api-secret \
+            --from-literal=OPENWEATHER_API_KEY=${{ secrets.OPENWEATHER_API_KEY }} \
+            --namespace=${{ env.K8S_NAMESPACE }} \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy to Kubernetes (Staging)
+        env:
+          IMAGE_TAG: develop-${{ github.sha }}
+          JFROG_REGISTRY: ${{ env.JFROG_REGISTRY }}
+        run: |
+          # Replace image tags in manifests
+          sed -i "s|IMAGE_TAG|$IMAGE_TAG|g" k8s/deployment.yaml
+          sed -i "s|JFROG_REGISTRY|$JFROG_REGISTRY|g" k8s/deployment.yaml
+          # Apply all manifests
+          kubectl apply -f k8s/ --namespace=${{ env.K8S_NAMESPACE }}
+
+      - name: Wait for Rollout
+        run: |
+          kubectl rollout status deployment/weather-backend \
+            --namespace=${{ env.K8S_NAMESPACE }} --timeout=120s
+          kubectl rollout status deployment/weather-frontend \
+            --namespace=${{ env.K8S_NAMESPACE }} --timeout=120s
+
+      - name: Get Staging URL
+        run: |
+          STAGING_URL=$(kubectl get ingress weather-ingress \
+            --namespace=${{ env.K8S_NAMESPACE }} \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          echo "🌍 Staging URL: http://$STAGING_URL"
+          echo "STAGING_URL=http://$STAGING_URL" >> $GITHUB_ENV
+
+  # ─────────────────────────────────────────────
+  # JOB 3: QA Tests on Staging
+  # ─────────────────────────────────────────────
+  qa-tests:
+    name: 🧪 Playwright QA Tests
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright
+        working-directory: frontend
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Wait for Staging to be Ready
+        run: sleep 30
+
+      - name: Run QA Tests
+        working-directory: frontend
+        env:
+          APP_URL: ${{ env.STAGING_URL }}
+        run: npm run test:ci
+
+      - name: Upload QA Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: frontend/playwright-report/
+          retention-days: 7
+
+      - name: QA Result
+        if: success()
+        run: echo "✅ All QA tests passed on staging! Ready to merge to main."

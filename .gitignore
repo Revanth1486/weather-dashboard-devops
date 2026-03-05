@@ -1,0 +1,12 @@
+node_modules/
+coverage/
+dist/
+.env
+.env.local
+*.tar
+terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/.terraform.lock.hcl
+playwright-report/
+test-results/
