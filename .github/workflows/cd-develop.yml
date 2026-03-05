@@ -3,6 +3,7 @@ name: CD - Staging (develop branch)
 on:
   push:
     branches: [develop]
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
 
 env:
   JFROG_REGISTRY: ${{ secrets.JFROG_REGISTRY }}
