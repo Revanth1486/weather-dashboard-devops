@@ -3,10 +3,9 @@ name: CD - Production (main branch)
 on:
   push:
     branches: [main]
-  workflow_dispatch:  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
 
 env:
-  JFROG_REGISTRY: ${{ secrets.JFROG_REGISTRY }}
   IMAGE_NAME: weather-dashboard
   AWS_REGION: us-east-1
   EKS_CLUSTER: weather-dashboard-prod
@@ -14,7 +13,7 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────
-  # JOB 1: Push Production Image to JFrog
+  # JOB 1: Push Production Image to DockerHub
   # ─────────────────────────────────────────────
   push-production:
     name: 📦 Tag & Push Production Image
@@ -27,12 +26,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to JFrog Artifactory
+      - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.JFROG_REGISTRY }}
-          username: ${{ secrets.JFROG_USERNAME }}
-          password: ${{ secrets.JFROG_PASSWORD }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build & Push Backend (Production)
         uses: docker/build-push-action@v5
@@ -40,9 +38,9 @@ jobs:
           context: ./backend
           push: true
           tags: |
-            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:${{ github.sha }}
-            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:latest
-            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:prod-${{ github.run_number }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/weather-backend:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/weather-backend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/weather-backend:prod-${{ github.run_number }}
 
       - name: Build & Push Frontend (Production)
         uses: docker/build-push-action@v5
@@ -50,9 +48,15 @@ jobs:
           context: ./frontend
           push: true
           tags: |
-            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:${{ github.sha }}
-            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:latest
-            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:prod-${{ github.run_number }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/weather-frontend:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/weather-frontend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/weather-frontend:prod-${{ github.run_number }}
+
+      - name: Images Pushed ✅
+        run: |
+          echo "✅ Production images pushed to DockerHub!"
+          echo "Backend:  ${{ secrets.DOCKERHUB_USERNAME }}/weather-backend:prod-${{ github.run_number }}"
+          echo "Frontend: ${{ secrets.DOCKERHUB_USERNAME }}/weather-frontend:prod-${{ github.run_number }}"
 
   # ─────────────────────────────────────────────
   # JOB 2: Deploy to Production EKS
@@ -61,7 +65,7 @@ jobs:
     name: 🚀 Deploy to Production EKS
     runs-on: ubuntu-latest
     needs: push-production
-    environment: production  # Requires manual approval in GitHub Environments
+    environment: production
 
     steps:
       - name: Checkout Code
@@ -85,10 +89,10 @@ jobs:
 
       - name: Create Secrets
         run: |
-          kubectl create secret docker-registry jfrog-registry-secret \
-            --docker-server=${{ env.JFROG_REGISTRY }} \
-            --docker-username=${{ secrets.JFROG_USERNAME }} \
-            --docker-password=${{ secrets.JFROG_PASSWORD }} \
+          kubectl create secret docker-registry dockerhub-registry-secret \
+            --docker-server=https://index.docker.io/v1/ \
+            --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
+            --docker-password=${{ secrets.DOCKERHUB_TOKEN }} \
             --namespace=${{ env.K8S_NAMESPACE }} \
             --dry-run=client -o yaml | kubectl apply -f -
 
@@ -100,10 +104,10 @@ jobs:
       - name: Deploy to Production
         env:
           IMAGE_TAG: ${{ github.sha }}
-          JFROG_REGISTRY: ${{ env.JFROG_REGISTRY }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
           sed -i "s|IMAGE_TAG|$IMAGE_TAG|g" k8s/deployment.yaml
-          sed -i "s|JFROG_REGISTRY|$JFROG_REGISTRY|g" k8s/deployment.yaml
+          sed -i "s|JFROG_REGISTRY|$DOCKERHUB_USERNAME|g" k8s/deployment.yaml
           kubectl apply -f k8s/ --namespace=${{ env.K8S_NAMESPACE }}
 
       - name: Rolling Deployment (Zero Downtime)

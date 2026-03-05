@@ -3,10 +3,9 @@ name: CD - Staging (develop branch)
 on:
   push:
     branches: [develop]
-  workflow_dispatch:  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
 
 env:
-  JFROG_REGISTRY: ${{ secrets.JFROG_REGISTRY }}
   IMAGE_NAME: weather-dashboard
   AWS_REGION: us-east-1
   EKS_CLUSTER: weather-dashboard-staging
@@ -14,10 +13,10 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────
-  # JOB 1: Push to JFrog Artifactory
+  # JOB 1: Push to DockerHub
   # ─────────────────────────────────────────────
-  push-to-jfrog:
-    name: 📦 Push to JFrog Artifactory
+  push-to-dockerhub:
+    name: 📦 Push to DockerHub
     runs-on: ubuntu-latest
 
     steps:
@@ -27,40 +26,35 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to JFrog Artifactory
+      - name: Login to DockerHub
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.JFROG_REGISTRY }}
-          username: ${{ secrets.JFROG_USERNAME }}
-          password: ${{ secrets.JFROG_PASSWORD }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & Push Backend to JFrog
+      - name: Build & Push Backend
         uses: docker/build-push-action@v5
         with:
           context: ./backend
           push: true
           tags: |
-            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:develop-${{ github.sha }}
-            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:develop-latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ${{ secrets.DOCKERHUB_USERNAME }}/weather-backend:develop-${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/weather-backend:develop-latest
 
-      - name: Build & Push Frontend to JFrog
+      - name: Build & Push Frontend
         uses: docker/build-push-action@v5
         with:
           context: ./frontend
           push: true
           tags: |
-            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:develop-${{ github.sha }}
-            ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:develop-latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ${{ secrets.DOCKERHUB_USERNAME }}/weather-frontend:develop-${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/weather-frontend:develop-latest
 
-      - name: JFrog Image Summary
+      - name: Images Pushed ✅
         run: |
-          echo "✅ Images pushed to JFrog:"
-          echo "  Backend:  ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-backend:develop-${{ github.sha }}"
-          echo "  Frontend: ${{ env.JFROG_REGISTRY }}/${{ env.IMAGE_NAME }}-frontend:develop-${{ github.sha }}"
+          echo "✅ Images pushed to DockerHub!"
+          echo "Backend:  ${{ secrets.DOCKERHUB_USERNAME }}/weather-backend:develop-${{ github.sha }}"
+          echo "Frontend: ${{ secrets.DOCKERHUB_USERNAME }}/weather-frontend:develop-${{ github.sha }}"
 
   # ─────────────────────────────────────────────
   # JOB 2: Deploy to Staging EKS
@@ -68,7 +62,7 @@ jobs:
   deploy-staging:
     name: 🚀 Deploy to Staging EKS
     runs-on: ubuntu-latest
-    needs: push-to-jfrog
+    needs: push-to-dockerhub
     environment: staging
 
     steps:
@@ -89,15 +83,14 @@ jobs:
             --name ${{ env.EKS_CLUSTER }}
 
       - name: Create Namespace
-        run: |
-          kubectl apply -f k8s/namespace.yaml
+        run: kubectl apply -f k8s/namespace.yaml
 
-      - name: Create JFrog Pull Secret
+      - name: Create DockerHub Pull Secret
         run: |
-          kubectl create secret docker-registry jfrog-registry-secret \
-            --docker-server=${{ env.JFROG_REGISTRY }} \
-            --docker-username=${{ secrets.JFROG_USERNAME }} \
-            --docker-password=${{ secrets.JFROG_PASSWORD }} \
+          kubectl create secret docker-registry dockerhub-registry-secret \
+            --docker-server=https://index.docker.io/v1/ \
+            --docker-username=${{ secrets.DOCKERHUB_USERNAME }} \
+            --docker-password=${{ secrets.DOCKERHUB_TOKEN }} \
             --namespace=${{ env.K8S_NAMESPACE }} \
             --dry-run=client -o yaml | kubectl apply -f -
 
@@ -111,12 +104,10 @@ jobs:
       - name: Deploy to Kubernetes (Staging)
         env:
           IMAGE_TAG: develop-${{ github.sha }}
-          JFROG_REGISTRY: ${{ env.JFROG_REGISTRY }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
         run: |
-          # Replace image tags in manifests
           sed -i "s|IMAGE_TAG|$IMAGE_TAG|g" k8s/deployment.yaml
-          sed -i "s|JFROG_REGISTRY|$JFROG_REGISTRY|g" k8s/deployment.yaml
-          # Apply all manifests
+          sed -i "s|JFROG_REGISTRY|$DOCKERHUB_USERNAME|g" k8s/deployment.yaml
           kubectl apply -f k8s/ --namespace=${{ env.K8S_NAMESPACE }}
 
       - name: Wait for Rollout
@@ -154,7 +145,7 @@ jobs:
       - name: Install Playwright
         working-directory: frontend
         run: |
-          npm ci
+          npm install
           npx playwright install chromium --with-deps
 
       - name: Wait for Staging to be Ready
