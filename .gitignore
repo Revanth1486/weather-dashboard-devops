@@ -10,3 +10,6 @@ terraform/terraform.tfstate.backup
 terraform/.terraform.lock.hcl
 playwright-report/
 test-results/
+terraform.tfstate
+terraform.tfstate.backup
+*.tfvars
