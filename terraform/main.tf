@@ -13,13 +13,14 @@ terraform {
 
   # Remote state in S3 — shows production-grade knowledge
   backend "s3" {
-    bucket         = "weather-dashboard-tfstate"
+    bucket         = "weather-dashboard-tfstate-revanth"
     key            = "eks/terraform.tfstate"
     region         = "us-east-1"
     dynamodb_table = "terraform-state-lock"
     encrypt        = true
   }
 }
+
 
 provider "aws" {
   region = var.aws_region

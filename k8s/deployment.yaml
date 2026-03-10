@@ -6,7 +6,6 @@ metadata:
   name: weather-backend
   labels:
     app: weather-backend
-    version: "IMAGE_TAG"
 spec:
   replicas: 2
   selector:
@@ -16,17 +15,15 @@ spec:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
-      maxUnavailable: 0          # Zero downtime rolling update
+      maxUnavailable: 0
   template:
     metadata:
       labels:
         app: weather-backend
     spec:
-      imagePullSecrets:
-        - name: jfrog-registry-secret
       containers:
         - name: backend
-          image: JFROG_REGISTRY/weather-dashboard-backend:IMAGE_TAG
+          image: revanthdandu983/weather-backend:latest
           ports:
             - containerPort: 5000
           env:
@@ -64,7 +61,6 @@ metadata:
   name: weather-frontend
   labels:
     app: weather-frontend
-    version: "IMAGE_TAG"
 spec:
   replicas: 2
   selector:
@@ -80,11 +76,9 @@ spec:
       labels:
         app: weather-frontend
     spec:
-      imagePullSecrets:
-        - name: jfrog-registry-secret
       containers:
         - name: frontend
-          image: JFROG_REGISTRY/weather-dashboard-frontend:IMAGE_TAG
+          image: revanthdandu983/weather-frontend:latest
           ports:
             - containerPort: 80
           resources:
